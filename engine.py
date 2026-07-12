@@ -161,7 +161,7 @@ def build_norms(d, tier_fill=None, demand_mult=None):
 
 def _assemble(d, req, hub_ss, cap, prod_cost, c_ph, c_hc,
               contract_mult, hub_pen_frac, hold_cost, integral=True,
-              tier_fill=None, tier_viol_cost=None):
+              tier_fill=None, tier_viol_cost=None, shortage_mult=1.0):
     tier_fill = tier_fill or TIER_FILL
     tier_viol_cost = tier_viol_cost or TIER_VIOL_COST
     skus = d['skus']
@@ -182,7 +182,8 @@ def _assemble(d, req, hub_ss, cap, prod_cost, c_ph, c_hc,
     ub = np.full(NV, np.inf)
 
     for i, s in enumerate(skus):
-        pen = d['penalty'][s] * (contract_mult if d['contractual'][s] else 1.0)
+        pen = (d['penalty'][s] * shortage_mult
+               * (contract_mult if d['contractual'][s] else 1.0))
         for p, P in enumerate(PLANTS):
             cost[iN(i, p)] = prod_cost[P] * BATCH
             if integral:
@@ -255,14 +256,15 @@ def _assemble(d, req, hub_ss, cap, prod_cost, c_ph, c_hc,
 
 def optimise(d, req, hub_ss, cap=None, prod_cost=None, c_ph=None, c_hc=None,
              contract_mult=50.0, hub_pen_frac=0.10, hold_cost=180.0,
-             time_limit=40, mip_gap=0.005, tier_fill=None, tier_viol_cost=None):
+             time_limit=40, mip_gap=0.005, tier_fill=None, tier_viol_cost=None,
+             shortage_mult=1.0):
     cap = cap or DEFAULT_CAP
     prod_cost = prod_cost or DEFAULT_PROD_COST
     c_ph = c_ph or DEFAULT_C_PH
     c_hc = c_hc or DEFAULT_C_HC
     A, lo, hi, cost, integ, lb, ub, cap_rows, ix = _assemble(
         d, req, hub_ss, cap, prod_cost, c_ph, c_hc, contract_mult, hub_pen_frac,
-        hold_cost, True, tier_fill, tier_viol_cost)
+        hold_cost, True, tier_fill, tier_viol_cost, shortage_mult)
     res = milp(c=cost, constraints=LinearConstraint(A, lo, hi), integrality=integ,
                bounds=Bounds(lb, ub),
                options=dict(time_limit=float(time_limit), mip_rel_gap=float(mip_gap),
@@ -298,7 +300,7 @@ def optimise(d, req, hub_ss, cap=None, prod_cost=None, c_ph=None, c_hc=None,
     t1 = sum(c_ph[(P, Hh)] * v for (s, P, Hh), v in ph.items())
     t2 = sum(c_hc[C][HUBS.index(Hh)] * v for (s, Hh, C), v in hc.items())
     pen = sum(d['penalty'][s] * (contract_mult if d['contractual'][s] else 1) * v
-              for (s, C), v in short.items())
+              for (s, C), v in short.items())   # true Exhibit-D rates, not scaled
     hsp = sum(d['penalty'][s] * hub_pen_frac * v for (s, Hh), v in hubshort.items())
     hold = sum(hold_cost * v for v in hubend.values())
     tvc = tier_viol_cost or TIER_VIOL_COST

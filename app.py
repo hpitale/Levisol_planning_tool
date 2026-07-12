@@ -115,6 +115,11 @@ with st.sidebar:
                          "future stockout risk. Priced as a fraction of full penalty.")
     hold = st.number_input("Hub holding cost (₹/kl-month)", 0, 5000, 180, 20,
                            help="Working capital carried on hub stock.")
+    serve_all = st.checkbox("Serve all demand (force 100% fill)", value=False,
+                            help="Overrides the economics and produces the extra "
+                                 "batches needed to leave nothing short. Costs about "
+                                 "₹7 lakh at base capacity — the tool will show you.")
+    smult = 100.0 if serve_all else 1.0
 
     st.header("8 · Solver")
     tl = st.slider("Time limit (s)", 10, 120, 40, 5)
@@ -154,7 +159,7 @@ with st.spinner("Optimising production and routing…"):
     norms, req, ss_cfa, hub_ss = E.build_norms(d, tier_fill=tf, demand_mult=dm)
     r = E.optimise(d, req, hub_ss, cap=cap, prod_cost=pc, c_ph=cph, c_hc=chc,
                    contract_mult=cm, hub_pen_frac=hpf, hold_cost=hold,
-                   time_limit=tl, mip_gap=gap, tier_fill=tf)
+                   time_limit=tl, mip_gap=gap, tier_fill=tf, shortage_mult=smult)
 elapsed = time.time() - t0
 
 if r is None:
@@ -203,6 +208,12 @@ else:
     st.markdown('<div class="banner"><b>All demand met.</b> '
                 'Every CFA requirement is satisfied within capacity.</div>',
                 unsafe_allow_html=True)
+
+if r['unmet_kl'] > 0.01 and not serve_all:
+    st.caption("The shortfall is deliberate. Production runs in 25 kl batches, so "
+               "serving the last few litres means making whole extra batches — the "
+               "penalty avoided is smaller than the cost incurred. Tick **Serve all "
+               "demand** in the sidebar to override and see the price.")
 
 # ---------------- Tabs ----------------
 T = st.tabs(["Cost summary", "Production plan", "Routing", "Network map",
