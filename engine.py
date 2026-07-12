@@ -254,7 +254,7 @@ def _assemble(d, req, hub_ss, cap, prod_cost, c_ph, c_hc,
 
 
 def optimise(d, req, hub_ss, cap=None, prod_cost=None, c_ph=None, c_hc=None,
-             contract_mult=3.0, hub_pen_frac=0.10, hold_cost=180.0,
+             contract_mult=50.0, hub_pen_frac=0.10, hold_cost=180.0,
              time_limit=40, mip_gap=0.005, tier_fill=None, tier_viol_cost=None):
     cap = cap or DEFAULT_CAP
     prod_cost = prod_cost or DEFAULT_PROD_COST
@@ -361,7 +361,7 @@ def to_frames(d, r, norms):
                            'Contractual': 'YES' if d['contractual'][s] else 'No',
                            'Unmet (kl)': round(v, 3),
                            'Penalty (Rs)': round(v * d['penalty'][s] *
-                                                 (3.0 if d['contractual'][s] else 1))}
+                                                 (50.0 if d['contractual'][s] else 1))}
                           for (s, C), v in sorted(r['short'].items(), key=lambda x: -x[1])])
     if unmet.empty:
         unmet = pd.DataFrame(columns=['SKU', 'CFA', 'Tier', 'Contractual',
@@ -383,3 +383,34 @@ def to_frames(d, r, norms):
         nrm[c] = nrm[c].round(3)
     return dict(production=prod, plant_hub=ph, hub_cfa=hc, unmet=unmet,
                 capacity=cap, norms=nrm)
+
+
+# --- geography for the routing map -------------------------------------------
+COORDS = {
+    'BOM': (19.0760, 72.8777), 'AHM': (23.0225, 72.5714), 'KOL': (22.5726, 88.3639),
+    'MHW': (19.2967, 73.0631), 'MHE': (22.6300, 88.4400),
+    'Guwahati CFA': (26.1445, 91.7362), 'Kolkata CFA': (22.5726, 88.3639),
+    'Jamshedpur CFA': (22.8046, 86.2029), 'Kanpur CFA': (26.4499, 80.3319),
+    'Haryana CFA': (28.4595, 77.0266), 'Rajpura CFA': (30.4849, 76.5940),
+    'Bhiwandi CFA': (19.2967, 73.0631), 'Bangalore CFA': (12.9716, 77.5946),
+    'Ahmedabad CFA': (23.0225, 72.5714), 'Hyderabad CFA': (17.3850, 78.4867),
+}
+
+
+def lp_cost(d, req, hub_ss, cap=None, prod_cost=None, c_ph=None, c_hc=None,
+            contract_mult=50.0, hub_pen_frac=0.10, hold_cost=180.0,
+            tier_fill=None, tier_viol_cost=None):
+    """Fast LP-relaxation cost. Drops the 25 kl batch integrality, so it is a lower
+    bound on the true plan cost -- but it moves the same way as the MILP when an input
+    changes, which is all a sensitivity chart needs. Solves in ~0.05s."""
+    cap = cap or DEFAULT_CAP
+    prod_cost = prod_cost or DEFAULT_PROD_COST
+    c_ph = c_ph or DEFAULT_C_PH
+    c_hc = c_hc or DEFAULT_C_HC
+    A, lo, hi, cost, integ, lb, ub, cap_rows, ix = _assemble(
+        d, req, hub_ss, cap, prod_cost, c_ph, c_hc, contract_mult, hub_pen_frac,
+        hold_cost, False, tier_fill, tier_viol_cost)
+    res = milp(c=cost, constraints=LinearConstraint(A, lo, hi),
+               integrality=integ, bounds=Bounds(lb, ub),
+               options=dict(presolve=True))
+    return float(res.fun) if res.x is not None else float('nan')

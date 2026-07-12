@@ -103,8 +103,13 @@ with st.sidebar:
           for t in ['A', 'B', 'C', 'D']}
 
     st.header("7 · Cost assumptions")
-    cm = st.slider("Contractual breach multiplier", 1.0, 10.0, 3.0, 0.5,
-                   help="Escalation applied to the stated penalty for contractual SKUs.")
+    protect = st.checkbox("Protect contractual SKUs absolutely", value=True,
+                          help="Price a contractual breach so highly that the plan will "
+                               "always serve these SKUs in full while capacity allows. "
+                               "Verified to cost effectively nothing at base capacity.")
+    cm = 50.0 if protect else st.slider(
+        "Contractual breach multiplier", 1.0, 10.0, 3.0, 0.5,
+        help="Escalation applied to the stated penalty for contractual SKUs.")
     hpf = st.slider("Hub shortfall penalty (× SKU penalty)", 0.0, 1.0, 0.10, 0.05,
                     help="A hub buffer gap does not lose a sale today — it raises "
                          "future stockout risk. Priced as a fraction of full penalty.")
@@ -200,8 +205,9 @@ else:
                 unsafe_allow_html=True)
 
 # ---------------- Tabs ----------------
-T = st.tabs(["Cost summary", "Production plan", "Routing", "Unmet demand",
-             "Inventory norms", "Capacity & shadow price", "Service–cost frontier",
+T = st.tabs(["Cost summary", "Production plan", "Routing", "Network map",
+             "Unmet demand", "Inventory norms", "Capacity & shadow price",
+             "Service–cost frontier", "Sensitivity", "Scenarios",
              "Compare to baseline"])
 
 with T[0]:
@@ -257,6 +263,69 @@ with T[2]:
     st.dataframe(F['hub_cfa'], use_container_width=True, hide_index=True, height=300)
 
 with T[3]:
+    st.caption("Where the volume actually moves. Arc height is proportional to "
+               "volume; plants feed hubs, hubs feed CFAs.")
+    try:
+        import pydeck as pdk
+        ph_agg = (F['plant_hub'].groupby(['Plant', 'Hub'], as_index=False)
+                  ['Volume (kl)'].sum())
+        hc_agg = (F['hub_cfa'].groupby(['Hub', 'CFA'], as_index=False)
+                  ['Volume (kl)'].sum())
+        arcs = []
+        for _, x in ph_agg.iterrows():
+            a, b = E.COORDS[x.Plant], E.COORDS[x.Hub]
+            arcs.append({"from_lon": a[1], "from_lat": a[0], "to_lon": b[1],
+                         "to_lat": b[0], "vol": float(x['Volume (kl)']),
+                         "label": f"{x.Plant} → {x.Hub}: {x['Volume (kl)']:,.0f} kl",
+                         "col": [0, 132, 61]})
+        for _, x in hc_agg.iterrows():
+            a, b = E.COORDS[x.Hub], E.COORDS[x.CFA]
+            arcs.append({"from_lon": a[1], "from_lat": a[0], "to_lon": b[1],
+                         "to_lat": b[0], "vol": float(x['Volume (kl)']),
+                         "label": f"{x.Hub} → {x.CFA}: {x['Volume (kl)']:,.0f} kl",
+                         "col": [201, 42, 42]})
+        adf = pd.DataFrame(arcs)
+        mx = max(adf["vol"].max(), 1)
+        adf["w"] = 1 + 11 * adf["vol"] / mx
+        nodes = []
+        for P in E.PLANTS:
+            v = F['production'][F['production'].Plant == P]['Volume (kl)'].sum()
+            nodes.append({"name": f"{P} plant", "lat": E.COORDS[P][0],
+                          "lon": E.COORDS[P][1], "vol": float(v),
+                          "col": [11, 42, 59], "r": 55000})
+        for H in E.HUBS:
+            v = ph_agg[ph_agg.Hub == H]['Volume (kl)'].sum()
+            nodes.append({"name": f"{H} hub", "lat": E.COORDS[H][0],
+                          "lon": E.COORDS[H][1], "vol": float(v),
+                          "col": [0, 132, 61], "r": 45000})
+        for C in E.CFAS:
+            v = hc_agg[hc_agg.CFA == C]['Volume (kl)'].sum()
+            nodes.append({"name": C, "lat": E.COORDS[C][0], "lon": E.COORDS[C][1],
+                          "vol": float(v), "col": [201, 42, 42], "r": 32000})
+        ndf = pd.DataFrame(nodes)
+        st.pydeck_chart(pdk.Deck(
+            map_style=None,
+            initial_view_state=pdk.ViewState(latitude=22.5, longitude=80.0,
+                                             zoom=3.7, pitch=42),
+            layers=[
+                pdk.Layer("ArcLayer", data=adf, get_source_position=["from_lon", "from_lat"],
+                          get_target_position=["to_lon", "to_lat"],
+                          get_source_color="col", get_target_color="col",
+                          get_width="w", pickable=True, auto_highlight=True),
+                pdk.Layer("ScatterplotLayer", data=ndf, get_position=["lon", "lat"],
+                          get_fill_color="col", get_radius="r", pickable=True,
+                          opacity=0.75),
+            ],
+            tooltip={"text": "{label}{name}\n{vol} kl"}))
+        a, b = st.columns(2)
+        a.dataframe(ph_agg.round(0), use_container_width=True, hide_index=True)
+        b.dataframe(hc_agg.round(0).sort_values('Volume (kl)', ascending=False),
+                    use_container_width=True, hide_index=True)
+    except Exception as ex:
+        st.warning(f"Map unavailable ({ex}). The routing tables above carry the "
+                   "same information.")
+
+with T[4]:
     if F['unmet'].empty:
         st.success("Nothing is short. Every CFA requirement is met in full.")
     else:
@@ -265,7 +334,7 @@ with T[3]:
         st.dataframe(F['unmet'], use_container_width=True, hide_index=True)
         st.metric("Total penalty", inr(c['penalty_unmet']))
 
-with T[4]:
+with T[5]:
     st.caption("Safety stock buffers forecast error and lead-time variability: "
                "SS = z·√(L·σ_d² + d̄²·σ_L²).  Reorder point = d̄·L + SS.")
     st.dataframe(F['norms'], use_container_width=True, hide_index=True, height=440)
@@ -277,7 +346,7 @@ with T[4]:
     cc2.metric("Pooling saving", f"{100*(1-hub_tot/max(tot_ss,1)):.0f}%",
                help="Hub buffer vs the sum of the CFA buffers it covers.")
 
-with T[5]:
+with T[6]:
     cap_df = F['capacity'].copy()
     with st.spinner("Valuing capacity…"):
         sp = E.shadow_prices(d, req, hub_ss, cap=cap, prod_cost=pc, c_ph=cph, c_hc=chc,
@@ -297,7 +366,7 @@ with T[5]:
             f'about {inr(top["Shadow price (₹/kl)"]*100*12)} a year per '
             f'100 kl/month added.</div>', unsafe_allow_html=True)
 
-with T[6]:
+with T[7]:
     st.caption("What each point of service costs. Re-solves the plan at a uniform "
                "target fill rate across all tiers.")
     if st.button("Build frontier (6 solves)"):
@@ -348,7 +417,109 @@ with T[6]:
                    "(A 98% / B 97% / C–D 92%) beats a uniform target — it buys "
                    "protection only where volume justifies it.")
 
-with T[7]:
+with T[8]:
+    st.caption("Which inputs actually move the cost. Each bar re-solves the plan with "
+               "that one input shifted, holding everything else fixed. "
+               "Computed on the LP relaxation, so it runs in about a second.")
+    swing = st.slider("Shift each input by ±", 0.05, 0.50, 0.20, 0.05,
+                      format="%.0f%%", key="sens_swing")
+    if st.button("Run sensitivity"):
+        with st.spinner("Testing each input…"):
+            base_lp = E.lp_cost(d, req, hub_ss, cap=cap, prod_cost=pc, c_ph=cph,
+                                c_hc=chc, contract_mult=cm, hub_pen_frac=hpf,
+                                hold_cost=hold, tier_fill=tf)
+            out = []
+            for name, lo_kw, hi_kw in [
+                ("Production cost (all plants)",
+                 dict(prod_cost={k: v*(1-swing) for k, v in pc.items()}),
+                 dict(prod_cost={k: v*(1+swing) for k, v in pc.items()})),
+                ("Freight rates",
+                 dict(c_ph={k: v*(1-swing) for k, v in cph.items()},
+                      c_hc={k: (a*(1-swing), b*(1-swing)) for k, (a, b) in chc.items()}),
+                 dict(c_ph={k: v*(1+swing) for k, v in cph.items()},
+                      c_hc={k: (a*(1+swing), b*(1+swing)) for k, (a, b) in chc.items()})),
+                ("Kolkata production cost",
+                 dict(prod_cost={**pc, 'KOL': pc['KOL']*(1-swing)}),
+                 dict(prod_cost={**pc, 'KOL': pc['KOL']*(1+swing)})),
+                ("Total plant capacity",
+                 dict(cap={P: {L: int(v*(1-swing)) for L, v in cap[P].items()}
+                           for P in E.PLANTS}),
+                 dict(cap={P: {L: int(v*(1+swing)) for L, v in cap[P].items()}
+                           for P in E.PLANTS})),
+                ("Hub shortfall penalty",
+                 dict(hub_pen_frac=hpf*(1-swing)),
+                 dict(hub_pen_frac=hpf*(1+swing))),
+            ]:
+                kw = dict(cap=cap, prod_cost=pc, c_ph=cph, c_hc=chc,
+                          contract_mult=cm, hub_pen_frac=hpf, hold_cost=hold,
+                          tier_fill=tf)
+                lo_c = E.lp_cost(d, req, hub_ss, **{**kw, **lo_kw})
+                hi_c = E.lp_cost(d, req, hub_ss, **{**kw, **hi_kw})
+                out.append({"Input": name,
+                            f"−{swing:.0%}": lo_c, f"+{swing:.0%}": hi_c,
+                            "Swing (₹)": abs(hi_c - lo_c),
+                            "Swing %": 100*abs(hi_c - lo_c)/base_lp})
+            sdf = pd.DataFrame(out).sort_values("Swing (₹)", ascending=False)
+            st.session_state.sens = (sdf, base_lp)
+    if "sens" in st.session_state:
+        sdf, base_lp = st.session_state.sens
+        show = sdf.copy()
+        for cl in show.columns[1:4]:
+            show[cl] = show[cl].map(inr)
+        show["Swing %"] = sdf["Swing %"].map(lambda v: f"{v:.1f}%")
+        st.dataframe(show, use_container_width=True, hide_index=True)
+        st.bar_chart(sdf.set_index("Input")["Swing (₹)"])
+        top = sdf.iloc[0]
+        st.markdown(
+            f'<div class="banner"><b>{top.Input}</b> is the input the plan is most '
+            f'exposed to — a ±{swing:.0%} move swings cost by {inr(top["Swing (₹)"])} '
+            f'({top["Swing %"]:.1f}%). Everything below it matters less.</div>',
+            unsafe_allow_html=True)
+
+with T[9]:
+    st.caption("Run any scenario, add it here, and compare them side by side.")
+    if "scen" not in st.session_state:
+        st.session_state.scen = []
+    nm = st.text_input("Name this scenario",
+                       value=f"Scenario {len(st.session_state.scen)+1}")
+    a, b = st.columns(2)
+    if a.button("Add current plan to comparison"):
+        tiers = {}
+        for t in ['A', 'B', 'C', 'D']:
+            dt = sum(v for (s_, C), v in req.items() if d['tier'][s_] == t)
+            ut = sum(v for (s_, C), v in r['short'].items() if d['tier'][s_] == t)
+            tiers[t] = 100*(1 - ut/dt) if dt else 100.0
+        st.session_state.scen.append({
+            "Scenario": nm, "Total OpEx": econ, "Produced (kl)": r['produced_kl'],
+            "Fill %": 100*r['fill_rate'], "Unmet (kl)": r['unmet_kl'],
+            "Hub SS gap (kl)": r['hub_short_kl'],
+            "Tier A %": tiers['A'], "Tier B %": tiers['B'],
+            "Tier C %": tiers['C'], "Tier D %": tiers['D'],
+            "_raw": econ})
+        st.success(f"Added “{nm}”.")
+    if b.button("Clear all scenarios"):
+        st.session_state.scen = []
+    if st.session_state.scen:
+        sc = pd.DataFrame(st.session_state.scen)
+        base0 = sc["_raw"].iloc[0]
+        sc["vs first"] = sc["_raw"].map(
+            lambda v: "—" if v == base0 else f"{100*(v/base0-1):+.0f}%")
+        disp = sc.drop(columns=["_raw"]).copy()
+        disp["Total OpEx"] = sc["Total OpEx"].map(inr)
+        for cl in ["Fill %", "Tier A %", "Tier B %", "Tier C %", "Tier D %"]:
+            disp[cl] = sc[cl].map(lambda v: f"{v:.2f}%")
+        for cl in ["Produced (kl)", "Unmet (kl)", "Hub SS gap (kl)"]:
+            disp[cl] = sc[cl].map(lambda v: f"{v:,.1f}")
+        st.dataframe(disp, use_container_width=True, hide_index=True)
+        st.bar_chart(sc.set_index("Scenario")["_raw"].rename("Total OpEx (₹)"))
+        st.caption("Change an input in the sidebar, press Run plan, then add it here. "
+                   "Suggested set: base · Kolkata outage · demand spike · "
+                   "capacity −50% · freight +50%.")
+    else:
+        st.info("No scenarios added yet. Run a plan, then choose "
+                "**Add current plan to comparison**.")
+
+with T[10]:
     st.caption("Save the current plan as the baseline, change any input, "
                "re-run, and see exactly what moved.")
     a, b = st.columns(2)
